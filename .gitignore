@@ -1,0 +1,13 @@
+# Secrets and local environments
+.env
+*.env
+backend/.env
+backend/.venv/
+
+# JavaScript dependencies and build output
+frontend/node_modules/
+frontend/dist/
+
+# Python cache
+__pycache__/
+*.py[cod]
