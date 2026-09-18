@@ -10,6 +10,6 @@ services:
       - key: OPENROUTER_API_KEY
         sync: false
       - key: OPENROUTER_MODEL
-        value: nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free
+        value: openrouter/free
       - key: CORS_ORIGINS
         sync: false
