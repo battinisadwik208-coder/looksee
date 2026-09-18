@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
 import json
@@ -21,14 +22,26 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openrouter/free")
 # Free vision providers can exhaust independently. Try the configured model first,
 # then let OpenRouter route to another available free vision model.
-MODEL_CANDIDATES = list(dict.fromkeys([
-    OPENROUTER_MODEL,
+# OpenRouter free workers can be exhausted independently. Prefer the provider
+# router and known vision-capable fallbacks when the configured NVIDIA worker is full.
+VISION_FALLBACK_MODELS = [
     "openrouter/free",
     "google/gemma-4-26b-a4b-it:free",
+    "google/gemma-4-31b-it:free",
     "qwen/qwen3.8-27b:free",
     "inclusionai/ling-3.0-flash-vl:free",
-]))
+    "nex-agi/nex-n2.5-mini:free",
+]
+configured_model = OPENROUTER_MODEL.strip()
+MODEL_CANDIDATES = list(dict.fromkeys(
+    ([] if configured_model.startswith("nvidia/") else [configured_model])
+    + VISION_FALLBACK_MODELS
+    + ([configured_model] if configured_model else [])
+))
 origins = [item.strip() for item in os.getenv("CORS_ORIGINS", "http://localhost:5173").split(",")]
+# Keep a single in-flight vision request per Render worker. This prevents a burst
+# of browser retries/uploads from filling the upstream provider worker queue.
+ANALYSIS_SEMAPHORE = asyncio.Semaphore(1)
 
 app = FastAPI(title="Looksee Image Analysis API")
 app.add_middleware(
@@ -136,6 +149,7 @@ async def classify(
         "model": OPENROUTER_MODEL,
         "temperature": 0.1,
         "max_tokens": 1000,
+        "provider": {"allow_fallbacks": True, "sort": "throughput"},
         "messages": [{
             "role": "user",
             "content": [
@@ -154,35 +168,40 @@ async def classify(
     data: dict[str, Any] | None = None
     last_provider_message = ""
     try:
-        async with httpx.AsyncClient(timeout=75) as client:
-            for model in MODEL_CANDIDATES:
-                payload["model"] = model
-                response = await client.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload)
-                if response.status_code in {401, 403}:
-                    raise HTTPException(status_code=502, detail="OpenRouter rejected the API key. Create a new OpenRouter key and replace OPENROUTER_API_KEY in Render.")
-                if response.status_code == 400:
-                    raise HTTPException(status_code=502, detail="OpenRouter rejected this image request. Try a JPG or PNG under 10 MB.")
-                try:
-                    candidate = response.json()
-                except ValueError:
-                    candidate = {}
-                provider_error = candidate.get("error") if isinstance(candidate, dict) else None
-                if response.is_success and not provider_error:
-                    data = candidate
-                    break
-                last_provider_message = str((provider_error or {}).get("message", ""))
-                # Free workers can be exhausted or rate-limited independently;
-                # continue to the next candidate instead of failing the request.
-                if response.status_code not in {429, 500, 502, 503} and "resourceexhausted" not in last_provider_message.lower() and "limit" not in last_provider_message.lower():
-                    break
-    except HTTPException:
+        async with ANALYSIS_SEMAPHORE:
+            async with httpx.AsyncClient(timeout=75) as client:
+                for model in MODEL_CANDIDATES:
+                    payload["model"] = model
+                    response = await client.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload)
+                    if response.status_code in {401, 403}:
+                        raise HTTPException(status_code=502, detail="OpenRouter rejected the API key. Create a new OpenRouter key and replace OPENROUTER_API_KEY in Render.")
+                    if response.status_code == 400:
+                        raise HTTPException(status_code=502, detail="OpenRouter rejected this image request. Try a JPG or PNG under 10 MB.")
+                    try:
+                        candidate = response.json()
+                    except ValueError:
+                        candidate = {}
+                    provider_error = candidate.get("error") if isinstance(candidate, dict) else None
+                    if response.is_success and not provider_error:
+                        data = candidate
+                        break
+                    last_provider_message = str((provider_error or {}).get("message", ""))
+                    # Free workers can be exhausted or rate-limited independently;
+                    # continue to the next candidate instead of failing the request.
+                    if response.status_code not in {408, 429, 500, 502, 503, 529} and "resourceexhausted" not in last_provider_message.lower() and "limit" not in last_provider_message.lower():
+                        break
+        except HTTPException:
         raise
     except httpx.RequestError as exc:
         raise HTTPException(status_code=502, detail="Could not reach OpenRouter. Check your connection and try again.") from exc
 
     if data is None:
-        safe_message = last_provider_message[:250] if last_provider_message else "All configured free vision models are temporarily busy."
-        raise HTTPException(status_code=502, detail=f"OpenRouter image error: {safe_message} Please try again shortly.")
+        provider_text = last_provider_message.lower()
+        if "resourceexhausted" in provider_text or "worker" in provider_text or "limit" in provider_text:
+            detail = "Vision providers are temporarily at capacity. Please wait a few seconds and try again."
+        else:
+            detail = "OpenRouter could not complete the image analysis. Please try again shortly."
+        raise HTTPException(status_code=503, detail=detail)
     try:
         raw_text = data["choices"][0]["message"]["content"]
         if not isinstance(raw_text, str):
