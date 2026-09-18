@@ -18,7 +18,16 @@ load_dotenv()
 MAX_FILE_SIZE = 10 * 1024 * 1024
 ALLOWED_TYPES = {"image/jpeg", "image/png", "image/webp"}
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free")
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openrouter/free")
+# Free vision providers can exhaust independently. Try the configured model first,
+# then let OpenRouter route to another available free vision model.
+MODEL_CANDIDATES = list(dict.fromkeys([
+    OPENROUTER_MODEL,
+    "openrouter/free",
+    "google/gemma-4-26b-a4b-it:free",
+    "qwen/qwen3.8-27b:free",
+    "inclusionai/ling-3.0-flash-vl:free",
+]))
 origins = [item.strip() for item in os.getenv("CORS_ORIGINS", "http://localhost:5173").split(",")]
 
 app = FastAPI(title="Looksee Image Analysis API")
@@ -138,34 +147,42 @@ async def classify(
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json",
-        "HTTP-Referer": "http://localhost:5173",
+        "HTTP-Referer": "https://looksee-sand.vercel.app",
         "X-Title": "Looksee Image Analysis",
     }
 
+    data: dict[str, Any] | None = None
+    last_provider_message = ""
     try:
         async with httpx.AsyncClient(timeout=75) as client:
-            response = await client.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload)
-            response.raise_for_status()
-    except httpx.HTTPStatusError as exc:
-        status = exc.response.status_code
-        if status in {401, 403}:
-            detail = "OpenRouter rejected the API key. Create a new OpenRouter key and replace OPENROUTER_API_KEY in backend/.env."
-        elif status == 404:
-            detail = f"OpenRouter model '{OPENROUTER_MODEL}' is unavailable."
-        elif status == 429:
-            detail = "OpenRouter is rate-limiting this key or free model. Wait a minute and try again."
-        elif status == 400:
-            detail = "OpenRouter rejected this image request. Try a JPG or PNG under 10 MB."
-        else:
-            detail = f"OpenRouter is temporarily unavailable (HTTP {status}). Try again in a minute."
-        raise HTTPException(status_code=502, detail=detail) from exc
+            for model in MODEL_CANDIDATES:
+                payload["model"] = model
+                response = await client.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload)
+                if response.status_code in {401, 403}:
+                    raise HTTPException(status_code=502, detail="OpenRouter rejected the API key. Create a new OpenRouter key and replace OPENROUTER_API_KEY in Render.")
+                if response.status_code == 400:
+                    raise HTTPException(status_code=502, detail="OpenRouter rejected this image request. Try a JPG or PNG under 10 MB.")
+                try:
+                    candidate = response.json()
+                except ValueError:
+                    candidate = {}
+                provider_error = candidate.get("error") if isinstance(candidate, dict) else None
+                if response.is_success and not provider_error:
+                    data = candidate
+                    break
+                last_provider_message = str((provider_error or {}).get("message", ""))
+                # Free workers can be exhausted or rate-limited independently;
+                # continue to the next candidate instead of failing the request.
+                if response.status_code not in {429, 500, 502, 503} and "resourceexhausted" not in last_provider_message.lower() and "limit" not in last_provider_message.lower():
+                    break
+    except HTTPException:
+        raise
     except httpx.RequestError as exc:
         raise HTTPException(status_code=502, detail="Could not reach OpenRouter. Check your connection and try again.") from exc
 
-    data: dict[str, Any] = response.json()
-    if "error" in data:
-        provider_message = data["error"].get("message", "The vision provider returned an unknown error.")
-        raise HTTPException(status_code=502, detail=f"OpenRouter image error: {provider_message[:250]}")
+    if data is None:
+        safe_message = last_provider_message[:250] if last_provider_message else "All configured free vision models are temporarily busy."
+        raise HTTPException(status_code=502, detail=f"OpenRouter image error: {safe_message} Please try again shortly.")
     try:
         raw_text = data["choices"][0]["message"]["content"]
         if not isinstance(raw_text, str):
