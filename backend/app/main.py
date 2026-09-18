@@ -190,7 +190,7 @@ async def classify(
                     # continue to the next candidate instead of failing the request.
                     if response.status_code not in {408, 429, 500, 502, 503, 529} and "resourceexhausted" not in last_provider_message.lower() and "limit" not in last_provider_message.lower():
                         break
-        except HTTPException:
+    except HTTPException:
         raise
     except httpx.RequestError as exc:
         raise HTTPException(status_code=502, detail="Could not reach OpenRouter. Check your connection and try again.") from exc
