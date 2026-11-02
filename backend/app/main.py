@@ -31,6 +31,7 @@ VISION_FALLBACK_MODELS = [
     "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
     "google/gemma-4-26b-a4b-it:free",
     "google/gemma-4-31b-it:free",
+    "thinkingmachines/inkling-small:free",
     "thinkingmachines/inkling:free",
     "dots-studio/dots-3-note-preview:free",
     "openrouter/free",
