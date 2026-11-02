@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 load_dotenv()
 
@@ -165,7 +165,7 @@ async def classify(
         "X-Title": "Looksee Image Analysis",
     }
 
-    data: dict[str, Any] | None = None
+    parsed_analysis: Analysis | None = None
     last_provider_message = ""
     try:
         async with ANALYSIS_SEMAPHORE:
@@ -183,8 +183,15 @@ async def classify(
                         candidate = {}
                     provider_error = candidate.get("error") if isinstance(candidate, dict) else None
                     if response.is_success and not provider_error:
-                        data = candidate
-                        break
+                        try:
+                            raw_text = candidate["choices"][0]["message"]["content"]
+                            if not isinstance(raw_text, str):
+                                raw_text = "".join(part.get("text", "") for part in raw_text if isinstance(part, dict))
+                            parsed_analysis = Analysis.model_validate(parse_model_json(raw_text))
+                            break
+                        except (KeyError, IndexError, TypeError, AttributeError, ValidationError, HTTPException) as exc:
+                            last_provider_message = f"unusable provider response: {type(exc).__name__}"
+                            continue
                     last_provider_message = str((provider_error or {}).get("message", ""))
                     # Free workers can be exhausted or rate-limited independently;
                     # continue to the next candidate instead of failing the request.
@@ -195,18 +202,14 @@ async def classify(
     except httpx.RequestError as exc:
         raise HTTPException(status_code=502, detail="Could not reach OpenRouter. Check your connection and try again.") from exc
 
-    if data is None:
+    if parsed_analysis is None:
         provider_text = last_provider_message.lower()
         if "resourceexhausted" in provider_text or "worker" in provider_text or "limit" in provider_text:
             detail = "Vision providers are temporarily at capacity. Please wait a few seconds and try again."
+        elif "unusable provider response" in provider_text:
+            detail = "Vision providers returned an unreadable answer. Please try again shortly."
         else:
             detail = "OpenRouter could not complete the image analysis. Please try again shortly."
         raise HTTPException(status_code=503, detail=detail)
-    try:
-        raw_text = data["choices"][0]["message"]["content"]
-        if not isinstance(raw_text, str):
-            raw_text = "".join(part.get("text", "") for part in raw_text if isinstance(part, dict))
-    except (KeyError, IndexError, TypeError) as exc:
-        raise HTTPException(status_code=502, detail="OpenRouter did not return an analysis.") from exc
 
-    return Analysis.model_validate(parse_model_json(raw_text))
+    return parsed_analysis
