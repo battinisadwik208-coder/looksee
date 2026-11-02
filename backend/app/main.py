@@ -191,12 +191,23 @@ async def classify(
                     provider_error = candidate.get("error") if isinstance(candidate, dict) else None
                     if response.is_success and not provider_error:
                         try:
-                            raw_text = candidate["choices"][0]["message"]["content"]
-                            if not isinstance(raw_text, str):
-                                raw_text = "".join(part.get("text", "") for part in raw_text if isinstance(part, dict))
+                            message = candidate["choices"][0]["message"]
+                            raw_text = message.get("content") if isinstance(message, dict) else None
+                            if isinstance(raw_text, list):
+                                raw_text = "".join(
+                                    part.get("text", "")
+                                    for part in raw_text
+                                    if isinstance(part, dict) and isinstance(part.get("text"), str)
+                                )
+                            elif isinstance(raw_text, dict):
+                                raw_text = raw_text.get("text", "") if isinstance(raw_text.get("text"), str) else ""
+                            elif not isinstance(raw_text, str):
+                                raw_text = ""
+                            if not raw_text.strip():
+                                raise ValueError("empty model response")
                             parsed_analysis = Analysis.model_validate(parse_model_json(raw_text))
                             break
-                        except (KeyError, IndexError, TypeError, AttributeError, ValidationError, HTTPException) as exc:
+                        except (KeyError, IndexError, TypeError, AttributeError, ValueError, ValidationError, HTTPException) as exc:
                             last_provider_message = f"unusable provider response: {type(exc).__name__}"
                             logger.warning("OpenRouter model %s returned unusable analysis (%s); trying fallback", model, type(exc).__name__)
                             continue
