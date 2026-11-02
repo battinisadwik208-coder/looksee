@@ -4,6 +4,7 @@ import asyncio
 import base64
 import io
 import json
+import logging
 import os
 from typing import Any
 
@@ -18,6 +19,7 @@ load_dotenv()
 
 MAX_FILE_SIZE = 10 * 1024 * 1024
 ALLOWED_TYPES = {"image/jpeg", "image/png", "image/webp"}
+logger = logging.getLogger("looksee.api")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openrouter/free")
 # Free vision providers can exhaust independently. Try the configured model first,
@@ -191,8 +193,11 @@ async def classify(
                             break
                         except (KeyError, IndexError, TypeError, AttributeError, ValidationError, HTTPException) as exc:
                             last_provider_message = f"unusable provider response: {type(exc).__name__}"
+                            logger.warning("OpenRouter model %s returned unusable analysis (%s); trying fallback", model, type(exc).__name__)
                             continue
                     last_provider_message = str((provider_error or {}).get("message", ""))
+                    provider_code = (provider_error.get("code") if isinstance(provider_error, dict) else None) or "none"
+                    logger.warning("OpenRouter model %s returned HTTP %s (provider code %s); trying fallback", model, response.status_code, provider_code)
                     # Free workers can be exhausted or rate-limited independently;
                     # continue to the next candidate instead of failing the request.
                     if response.status_code not in {408, 429, 500, 502, 503, 529} and "resourceexhausted" not in last_provider_message.lower() and "limit" not in last_provider_message.lower():
