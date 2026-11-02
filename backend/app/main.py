@@ -27,12 +27,13 @@ OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openrouter/free")
 # OpenRouter free workers can be exhausted independently. Prefer the provider
 # router and known vision-capable fallbacks when the configured NVIDIA worker is full.
 VISION_FALLBACK_MODELS = [
-    "openrouter/free",
+    "nvidia/nemotron-3.5-super-vl:free",
+    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
     "google/gemma-4-26b-a4b-it:free",
     "google/gemma-4-31b-it:free",
-    "qwen/qwen3.8-27b:free",
-    "inclusionai/ling-3.0-flash-vl:free",
-    "nex-agi/nex-n2.5-mini:free",
+    "thinkingmachines/inkling:free",
+    "dots-studio/dots-3-note-preview:free",
+    "openrouter/free",
 ]
 configured_model = OPENROUTER_MODEL.strip()
 MODEL_CANDIDATES = list(dict.fromkeys(
@@ -200,7 +201,7 @@ async def classify(
                     logger.warning("OpenRouter model %s returned HTTP %s (provider code %s); trying fallback", model, response.status_code, provider_code)
                     # Free workers can be exhausted or rate-limited independently;
                     # continue to the next candidate instead of failing the request.
-                    if response.status_code not in {408, 429, 500, 502, 503, 529} and "resourceexhausted" not in last_provider_message.lower() and "limit" not in last_provider_message.lower():
+                    if response.status_code not in {404, 408, 429, 500, 502, 503, 529} and "resourceexhausted" not in last_provider_message.lower() and "limit" not in last_provider_message.lower():
                         break
     except HTTPException:
         raise
