@@ -170,14 +170,18 @@ async def classify(
 
     parsed_analysis: Analysis | None = None
     last_provider_message = ""
+    response_count = 0
+    auth_failure_count = 0
     try:
         async with ANALYSIS_SEMAPHORE:
             async with httpx.AsyncClient(timeout=75) as client:
                 for model in MODEL_CANDIDATES:
                     payload["model"] = model
                     response = await client.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload)
+                    response_count += 1
                     if response.status_code in {401, 403}:
-                        raise HTTPException(status_code=502, detail="OpenRouter rejected the API key. Create a new OpenRouter key and replace OPENROUTER_API_KEY in Render.")
+                        auth_failure_count += 1
+                        logger.warning("OpenRouter model %s returned authorization HTTP %s; trying fallback", model, response.status_code)
                     if response.status_code == 400:
                         raise HTTPException(status_code=502, detail="OpenRouter rejected this image request. Try a JPG or PNG under 10 MB.")
                     try:
@@ -201,7 +205,7 @@ async def classify(
                     logger.warning("OpenRouter model %s returned HTTP %s (provider code %s); trying fallback", model, response.status_code, provider_code)
                     # Free workers can be exhausted or rate-limited independently;
                     # continue to the next candidate instead of failing the request.
-                    if response.status_code not in {404, 408, 429, 500, 502, 503, 529} and "resourceexhausted" not in last_provider_message.lower() and "limit" not in last_provider_message.lower():
+                    if response.status_code not in {401, 403, 404, 408, 429, 500, 502, 503, 529} and "resourceexhausted" not in last_provider_message.lower() and "limit" not in last_provider_message.lower():
                         break
     except HTTPException:
         raise
@@ -210,7 +214,11 @@ async def classify(
 
     if parsed_analysis is None:
         provider_text = last_provider_message.lower()
-        if "resourceexhausted" in provider_text or "worker" in provider_text or "limit" in provider_text:
+        if response_count and auth_failure_count == response_count:
+            detail = "OpenRouter rejected the API key for all attempted vision models. Check that the key saved in Render is active."
+        elif auth_failure_count:
+            detail = "Some vision models rejected the saved key and the remaining models could not analyze this image. Please retry shortly."
+        elif "resourceexhausted" in provider_text or "worker" in provider_text or "limit" in provider_text:
             detail = "Vision providers are temporarily at capacity. Please wait a few seconds and try again."
         elif "unusable provider response" in provider_text:
             detail = "Vision providers returned an unreadable answer. Please try again shortly."
